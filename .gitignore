@@ -29,3 +29,5 @@ dist/
 # Sensitive information/local configuration
 config.ini
 .env
+amorabot-20b9cd41392c.json
+tgeriktest-298ff3a175a3.json

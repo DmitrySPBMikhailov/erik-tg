@@ -33,7 +33,7 @@ def ask_contact(message):
     markup.add(contact_button)
     bot.send_message(
         message.chat.id,
-        "Пожалуйста, отправьте номер телефона, нажав кнопку ниже. Нажимая на кнопку, Вы даете согласение на обработку персональных данных.",
+        "Пожалуйста, отправьте номер телефона, нажав кнопку ниже.",
         reply_markup=markup,
     )
 
@@ -41,69 +41,91 @@ def ask_contact(message):
 # старт
 @bot.message_handler(commands=["start"])
 def main(message):
-    bot.send_message(message.chat.id, "Введите ваш токен:")
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add(types.KeyboardButton("🪪 Активировать Amora Pass"))
+    bot.send_message(
+        message.chat.id,
+        "Добро пожаловать! Нажмите кнопку ниже для активации:",
+        reply_markup=markup,
+    )
+
+
+@bot.message_handler(func=lambda message: message.text == "🪪 Активировать Amora Pass")
+def ask_consent(message):
+    user_data[message.from_user.id] = {"step": "awaiting_consent"}
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add(types.KeyboardButton("✅ Согласен"))
+    bot.send_message(
+        message.chat.id,
+        "При активации Amora Pass вы даёте согласие на обработку персональных данных.",
+        reply_markup=markup,
+    )
+
+
+@bot.message_handler(func=lambda message: message.text == "✅ Согласен")
+def ask_code(message):
+    uid = message.from_user.id
+    if uid in user_data and user_data[uid].get("step") == "awaiting_consent":
+        user_data[uid]["step"] = "awaiting_code"
+        bot.send_message(message.chat.id, "Пожалуйста, введите ваш код:")
 
 
 # обработка инпута от пользователя
-@bot.message_handler(func=lambda message: True, content_types=["text"])
+@bot.message_handler(func=lambda message: message.content_type == "text")
 def handle_text(message):
     user_id = message.from_user.id
     text = message.text.strip()
 
     if user_id not in user_data:
-        # Сначала проверяем код
+        bot.send_message(
+            message.chat.id,
+            "Пожалуйста, нажмите кнопку «Активировать Amora Pass» для начала.",
+        )
+        return
+
+    step = user_data[user_id].get("step")
+
+    if step == "awaiting_code":
         try:
-            codes_range = worksheet.range("A2:A501")
+            codes_range = worksheet.range("A2:A20")
             found = None
             for cell in codes_range:
                 if cell.value == text:
                     found = cell.row
                     break
             if found:
-                activation_value = worksheet.cell(
-                    found, 6
-                ).value  # F колонка — дата активации
+                activation_value = worksheet.cell(found, 6).value  # колонка F
                 if activation_value:
-                    bot.send_message(
-                        message.chat.id,
-                        "⛔ Этот токен уже активирован. Повторная активация невозможна.",
-                    )
+                    bot.send_message(message.chat.id, "⛔ Этот код уже активирован.")
                     return
-                # Код найден и не активирован
-                user_data[user_id] = {"row": found, "code": text, "step": "vk_id"}
-                bot.send_message(
-                    message.chat.id,
-                    "Токен найден. Введите ваш VK ID (можно ссылку или @username):",
-                )
+                # Код принят
+                user_data[user_id].update({"row": found, "code": text, "step": "vk_id"})
+                bot.send_message(message.chat.id, "Код принят. Введите ваш VK ID:")
             else:
-                bot.send_message(
-                    message.chat.id, "Токен не найден. Попробуйте ещё раз."
-                )
+                bot.send_message(message.chat.id, "Код не найден. Попробуйте ещё раз.")
         except Exception as e:
-            bot.send_message(message.chat.id, f"Ошибка при работе с таблицей: {str(e)}")
-    else:
-        step = user_data[user_id].get("step")
+            bot.send_message(message.chat.id, f"Ошибка при поиске кода: {str(e)}")
 
-        if step == "vk_id":
-            user_data[user_id]["vk_id"] = text
-            user_data[user_id]["step"] = "email"
-            bot.send_message(message.chat.id, "Введите ваш email:")
+    elif step == "vk_id":
+        user_data[user_id]["vk_id"] = text
+        user_data[user_id]["step"] = "email"
+        bot.send_message(message.chat.id, "Введите ваш email:")
 
-        elif step == "email":
-            user_data[user_id]["email"] = text
-            full_name = f"{message.from_user.first_name or ''} {message.from_user.last_name or ''}".strip()
-            if full_name:
-                user_data[user_id]["name"] = full_name
-                user_data[user_id]["step"] = "confirm"
-                ask_contact(message)
-            else:
-                user_data[user_id]["step"] = "name"
-                bot.send_message(message.chat.id, "Введите ваше имя полностью:")
-
-        elif step == "name":
-            user_data[user_id]["name"] = text
+    elif step == "email":
+        user_data[user_id]["email"] = text
+        full_name = f"{message.from_user.first_name or ''} {message.from_user.last_name or ''}".strip()
+        if full_name:
+            user_data[user_id]["name"] = full_name
             user_data[user_id]["step"] = "confirm"
             ask_contact(message)
+        else:
+            user_data[user_id]["step"] = "name"
+            bot.send_message(message.chat.id, "Введите ваше имя полностью:")
+
+    elif step == "name":
+        user_data[user_id]["name"] = text
+        user_data[user_id]["step"] = "confirm"
+        ask_contact(message)
 
 
 @bot.message_handler(content_types=["contact"])
@@ -116,6 +138,7 @@ def handle_contact(message):
             vk_id = user_data[user_id]["vk_id"]
             name = user_data[user_id]["name"]
             email = user_data[user_id]["email"]
+            phone = message.contact.phone_number
             activation_date = datetime.now().strftime("%Y-%m-%d %H:%M")
 
             worksheet.update_acell(f"B{row}", telegram_id)
@@ -130,7 +153,7 @@ def handle_contact(message):
         except Exception as e:
             bot.send_message(message.chat.id, f"Ошибка при записи в таблицу: {str(e)}")
     else:
-        bot.send_message(message.chat.id, "Пожалуйста, сначала введите токен.")
+        bot.send_message(message.chat.id, "Сначала активируйте Amora Pass.")
 
 
 bot.infinity_polling()
