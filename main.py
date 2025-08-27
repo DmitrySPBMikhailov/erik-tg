@@ -9,151 +9,111 @@ load_dotenv()
 
 SERVICE_ACCOUNT_FILE = os.getenv("MY_JSON_KEY")
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-# Авторизация в гугл
 credentials = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
 gc = gspread.authorize(credentials)
 
-# Открываем таблицу по id
 SPREADSHEET_ID = os.getenv("MY_SPREAD_SHEET_ID")
 worksheet = gc.open_by_key(SPREADSHEET_ID).sheet1
 
 API_TOKEN = os.getenv("MY_API_KEY")
 bot = TeleBot(API_TOKEN)
 
-# Словарь для хранения данных по пользователю
+# Храним шаги пользователей
 user_data = {}
 
-
-# доп функция для сбора данных. Используется ниже
-def ask_contact(message):
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-    contact_button = types.KeyboardButton(
-        "Отправить номер телефона", request_contact=True
-    )
-    markup.add(contact_button)
-    bot.send_message(
-        message.chat.id,
-        "Пожалуйста, отправьте номер телефона, нажав кнопку ниже.",
-        reply_markup=markup,
-    )
+# список админов
+ADMINS = list(map(int, os.getenv("ADMINS", "").split(",")))
 
 
 # старт
 @bot.message_handler(commands=["start"])
-def main(message):
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add(types.KeyboardButton("🪪 Активировать Amora Pass"))
-    bot.send_message(
-        message.chat.id,
-        "Добро пожаловать! Нажмите кнопку ниже для активации:",
-        reply_markup=markup,
-    )
+def start(message):
+    bot.send_message(message.chat.id, "✨ Пожалуйста, введите ваш код:")
 
 
-@bot.message_handler(func=lambda message: message.text == "🪪 Активировать Amora Pass")
-def ask_consent(message):
-    user_data[message.from_user.id] = {"step": "awaiting_consent"}
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add(types.KeyboardButton("✅ Согласен"))
-    bot.send_message(
-        message.chat.id,
-        "При активации Amora Pass вы даёте согласие на обработку персональных данных.",
-        reply_markup=markup,
-    )
-
-
-@bot.message_handler(func=lambda message: message.text == "✅ Согласен")
-def ask_code(message):
-    uid = message.from_user.id
-    if uid in user_data and user_data[uid].get("step") == "awaiting_consent":
-        user_data[uid]["step"] = "awaiting_code"
-        bot.send_message(message.chat.id, "Пожалуйста, введите ваш код:")
-
-
-# обработка инпута от пользователя
-@bot.message_handler(func=lambda message: message.content_type == "text")
-def handle_text(message):
+# обработка ввода кода
+@bot.message_handler(
+    func=lambda message: message.text and not message.text.startswith("/")
+)
+def handle_code(message):
     user_id = message.from_user.id
     text = message.text.strip()
 
-    if user_id not in user_data:
-        bot.send_message(
-            message.chat.id,
-            "Пожалуйста, нажмите кнопку «Активировать Amora Pass» для начала.",
-        )
+    bot.send_message(message.chat.id, "🔎 Поиск...")  # <-- промежуточный ответ
+
+    try:
+        codes_range = worksheet.range("A2:A501")  # список кодов в колонке A
+        found = None
+        for cell in codes_range:
+            if cell.value == text:
+                found = cell.row
+                break
+
+        if found:
+            tg_id_cell = worksheet.cell(found, 2).value  # колонка B
+            if tg_id_cell:  # уже записан ID
+                bot.send_message(message.chat.id, "⛔ Этот код уже активирован.")
+                return
+
+            # записываем только Telegram ID
+            worksheet.update_acell(f"B{found}", str(user_id))
+            worksheet.update_acell(
+                f"C{found}", datetime.now().strftime("%Y-%m-%d %H:%M")
+            )  # опционально время
+            bot.send_message(
+                message.chat.id,
+                "✅ Всё получилось. С этого момента мы вместе, и Amora Pass будет открывать "
+                "для тебя всё больше привилегий с партнёрами Amora.",
+            )
+
+        else:
+            bot.send_message(
+                message.chat.id,
+                "❌ Дорогое сердце, проверь пожалуйста код ещё раз. "
+                "К сожалению, я не нашёл такого в моей базе.",
+            )
+
+    except Exception as e:
+        bot.send_message(message.chat.id, f"Ошибка при поиске кода: {str(e)}")
+
+
+# команда для запуска рассылки
+@bot.message_handler(commands=["broadcast"])
+def start_broadcast(message):
+    if message.from_user.id not in ADMINS:
+        bot.reply_to(message, "⛔ У вас нет прав для этой команды.")
         return
 
-    step = user_data[user_id].get("step")
-
-    if step == "awaiting_code":
-        try:
-            codes_range = worksheet.range("A2:A20")
-            found = None
-            for cell in codes_range:
-                if cell.value == text:
-                    found = cell.row
-                    break
-            if found:
-                activation_value = worksheet.cell(found, 6).value  # колонка F
-                if activation_value:
-                    bot.send_message(message.chat.id, "⛔ Этот код уже активирован.")
-                    return
-                # Код принят
-                user_data[user_id].update({"row": found, "code": text, "step": "vk_id"})
-                bot.send_message(message.chat.id, "Код принят. Введите ваш VK ID:")
-            else:
-                bot.send_message(message.chat.id, "Код не найден. Попробуйте ещё раз.")
-        except Exception as e:
-            bot.send_message(message.chat.id, f"Ошибка при поиске кода: {str(e)}")
-
-    elif step == "vk_id":
-        user_data[user_id]["vk_id"] = text
-        user_data[user_id]["step"] = "email"
-        bot.send_message(message.chat.id, "Введите ваш email:")
-
-    elif step == "email":
-        user_data[user_id]["email"] = text
-        full_name = f"{message.from_user.first_name or ''} {message.from_user.last_name or ''}".strip()
-        if full_name:
-            user_data[user_id]["name"] = full_name
-            user_data[user_id]["step"] = "confirm"
-            ask_contact(message)
-        else:
-            user_data[user_id]["step"] = "name"
-            bot.send_message(message.chat.id, "Введите ваше имя полностью:")
-
-    elif step == "name":
-        user_data[user_id]["name"] = text
-        user_data[user_id]["step"] = "confirm"
-        ask_contact(message)
+    bot.send_message(message.chat.id, "✍️ Введите текст рассылки одним сообщением:")
+    bot.register_next_step_handler(message, process_broadcast)
 
 
-@bot.message_handler(content_types=["contact"])
-def handle_contact(message):
-    user_id = message.from_user.id
-    if user_id in user_data and user_data[user_id].get("step") == "confirm":
-        try:
-            row = user_data[user_id]["row"]
-            telegram_id = str(user_id)
-            vk_id = user_data[user_id]["vk_id"]
-            name = user_data[user_id]["name"]
-            email = user_data[user_id]["email"]
-            phone = message.contact.phone_number
-            activation_date = datetime.now().strftime("%Y-%m-%d %H:%M")
+def process_broadcast(message):
+    if message.from_user.id not in ADMINS:
+        return
 
-            worksheet.update_acell(f"B{row}", telegram_id)
-            worksheet.update_acell(f"C{row}", vk_id)
-            worksheet.update_acell(f"D{row}", name)
-            worksheet.update_acell(f"E{row}", email)
-            worksheet.update_acell(f"F{row}", activation_date)
+    text = message.text
+    bot.send_message(message.chat.id, f"📢 Начинаю рассылку...\n\nТекст:\n{text}")
 
-            bot.send_message(message.chat.id, "✅ Спасибо! Активация прошла успешно.")
-            user_data.pop(user_id)
+    try:
+        tg_ids = worksheet.col_values(2)[1:]  # колонка B (Telegram ID), без заголовка
+        sent, failed = 0, 0
+        for tg_id in tg_ids:
+            if tg_id.strip():
+                try:
+                    bot.send_message(int(tg_id), text)
+                    sent += 1
+                except Exception as e:
+                    print(f"Ошибка при отправке {tg_id}: {e}")
+                    failed += 1
 
-        except Exception as e:
-            bot.send_message(message.chat.id, f"Ошибка при записи в таблицу: {str(e)}")
-    else:
-        bot.send_message(message.chat.id, "Сначала активируйте Amora Pass.")
+        bot.send_message(
+            message.chat.id,
+            f"✅ Рассылка завершена.\nУспешно: {sent}\nОшибок: {failed}",
+        )
+
+    except Exception as e:
+        bot.send_message(message.chat.id, f"Ошибка при рассылке: {str(e)}")
 
 
 bot.infinity_polling()
